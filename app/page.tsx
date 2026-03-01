@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { z } from "zod";
+import { TABLES, MERGE_GROUPS, TIME_SLOTS, isClosedDay } from "./bookingConfig";
 
 const BookingSchema = z.object({
   date: z.string().min(1, "Choose a date"),
@@ -15,22 +16,37 @@ const BookingSchema = z.object({
 
 type Booking = z.infer<typeof BookingSchema>;
 
-const OFF_PEAK = [
-  { start: "16:30", end: "18:00" },
-  { start: "20:00", end: "21:00" },
-];
+function findSeating(partySize: number) {
+  // 1️⃣ Try single tables (smallest fitting first)
+  const sortedSingles = [...TABLES].sort((a, b) => a.seats - b.seats);
+  const single = sortedSingles.find((t) => t.seats >= partySize);
+  if (single) {
+    return { type: "single", tables: [single.id], seats: single.seats };
+  }
 
-function isOffPeak(time: string) {
-  return OFF_PEAK.some(({ start, end }) => time >= start && time < end);
-}
+  // 2️⃣ Try merge groups
+  for (const group of MERGE_GROUPS) {
+    const groupTables = TABLES.filter((t) =>
+      group.tableIds.includes(t.id)
+    );
+    const totalSeats = groupTables.reduce((sum, t) => sum + t.seats, 0);
 
-function labelFor(time: string) {
-  return isOffPeak(time) ? "Off-Peak (Better Value)" : "Peak (High Demand)";
+    if (totalSeats >= partySize) {
+      return {
+        type: "merge",
+        tables: group.tableIds,
+        seats: totalSeats,
+      };
+    }
+  }
+
+  return null;
 }
 
 export default function Home() {
   const [submitted, setSubmitted] = useState<Booking | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+
   const [form, setForm] = useState<Booking>({
     date: "",
     time: "",
@@ -41,7 +57,9 @@ export default function Home() {
     notes: "",
   });
 
-  const band = useMemo(() => (form.time ? labelFor(form.time) : ""), [form.time]);
+  const seating = form.partySize
+    ? findSeating(Number(form.partySize))
+    : null;
 
   function onChange<K extends keyof Booking>(key: K, value: Booking[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -56,6 +74,16 @@ export default function Home() {
     e.preventDefault();
     setErrors({});
 
+    if (isClosedDay(form.date)) {
+      setErrors({ date: "We’re closed Sundays and Mondays." });
+      return;
+    }
+
+    if (!seating) {
+      setErrors({ partySize: "No tables available for this party size." });
+      return;
+    }
+
     const parsed = BookingSchema.safeParse(form);
     if (!parsed.success) {
       const next: Record<string, string> = {};
@@ -67,7 +95,6 @@ export default function Home() {
       return;
     }
 
-    // Phase 6 will send to database / email / admin dashboard.
     setSubmitted(parsed.data);
   }
 
@@ -75,33 +102,26 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-white text-zinc-900">
         <div className="mx-auto max-w-md px-6 py-10">
-          <p className="text-xs tracking-widest text-zinc-500">THE PROVINCIAL</p>
-          <h1 className="mt-2 text-2xl font-semibold">Booking Request Sent</h1>
+          <h1 className="text-2xl font-semibold">Booking Request Sent</h1>
           <p className="mt-2 text-sm text-zinc-600">
-            We’ll confirm shortly. If it’s urgent, call the venue.
+            We’ll confirm shortly.
           </p>
 
-          <div className="mt-8 rounded-2xl border border-zinc-200 p-5 shadow-sm">
-            <div className="space-y-2 text-sm">
-              <Row label="Date" value={submitted.date} />
-              <Row label="Time" value={submitted.time} />
-              <Row label="Party" value={`${submitted.partySize}`} />
-              <Row label="Name" value={submitted.name} />
-              <Row label="Mobile" value={submitted.mobile} />
-              <Row label="Email" value={submitted.email} />
-              <Row label="Time band" value={labelFor(submitted.time)} />
-              {submitted.notes ? <Row label="Notes" value={submitted.notes} /> : null}
-            </div>
+          <div className="mt-6 rounded-xl border p-4 text-sm">
+            <p><strong>Date:</strong> {submitted.date}</p>
+            <p><strong>Time:</strong> {submitted.time}</p>
+            <p><strong>Party:</strong> {submitted.partySize}</p>
+            <p><strong>Name:</strong> {submitted.name}</p>
+            <p><strong>Mobile:</strong> {submitted.mobile}</p>
+            <p><strong>Email:</strong> {submitted.email}</p>
           </div>
 
           <button
             onClick={() => setSubmitted(null)}
-            className="mt-6 w-full rounded-xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
+            className="mt-6 w-full rounded-xl bg-black text-white py-3"
           >
             Make another booking
           </button>
-
-          <p className="mt-6 text-xs text-zinc-500">v0.2 • Live</p>
         </div>
       </main>
     );
@@ -110,138 +130,110 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-white text-zinc-900">
       <div className="mx-auto max-w-md px-6 py-10">
-        <header className="mb-8">
-          <p className="text-xs tracking-widest text-zinc-500">THE PROVINCIAL</p>
-          <h1 className="mt-2 text-2xl font-semibold">Book a Table</h1>
-          <p className="mt-2 text-sm text-zinc-600">
-            Choose a time. Off-Peak shows better value. Peak is high demand.
-          </p>
-        </header>
+        <h1 className="text-2xl font-semibold mb-6">Book a Table</h1>
 
-        <section className="rounded-2xl border border-zinc-200 p-5 shadow-sm">
-          <h2 className="text-sm font-medium text-zinc-900">Request a booking</h2>
+        <form onSubmit={onSubmit} className="space-y-4">
 
-          <form onSubmit={onSubmit} className="mt-4 space-y-4">
-            <Field label="Date" error={errors.date}>
-              <input
-                type="date"
-                value={form.date}
-                onChange={(e) => onChange("date", e.target.value)}
-                className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </Field>
+          {/* Date */}
+          <div>
+            <label className="text-sm font-medium">Date</label>
+            <input
+              type="date"
+              value={form.date}
+              onChange={(e) => onChange("date", e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
+            />
+            {errors.date && (
+              <p className="text-xs text-red-600">{errors.date}</p>
+            )}
+          </div>
 
-            <Field
-              label="Time"
-              hint={band ? band : "Off-Peak: 4:30–6:00pm • 8:00–9:00pm"}
-              error={errors.time}
+          {/* Time */}
+          <div>
+            <label className="text-sm font-medium">Time</label>
+            <select
+              value={form.time}
+              onChange={(e) => onChange("time", e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
             >
-              <input
-                type="time"
-                value={form.time}
-                onChange={(e) => onChange("time", e.target.value)}
-                className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </Field>
+              <option value="">Select a time</option>
+              {TIME_SLOTS.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            {errors.time && (
+              <p className="text-xs text-red-600">{errors.time}</p>
+            )}
+          </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Party size" error={errors.partySize}>
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={form.partySize}
-                  onChange={(e) => onChange("partySize", e.target.value as any)}
-                  className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-                />
-              </Field>
+          {/* Party Size */}
+          <div>
+            <label className="text-sm font-medium">Party size</label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={form.partySize}
+              onChange={(e) =>
+                onChange("partySize", Number(e.target.value))
+              }
+              className="w-full border rounded-xl px-3 py-2"
+            />
 
-              <Field label="Mobile" error={errors.mobile}>
-                <input
-                  inputMode="tel"
-                  placeholder="04xx xxx xxx"
-                  value={form.mobile}
-                  onChange={(e) => onChange("mobile", e.target.value)}
-                  className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-                />
-              </Field>
-            </div>
+            {form.partySize && (
+              <p className="text-xs mt-1 text-zinc-600">
+                {seating
+                  ? `Available: ${seating.tables.join("+")} (${seating.seats} seats)`
+                  : "No available tables for this party size"}
+              </p>
+            )}
 
-            <Field label="Email" error={errors.email}>
-              <input
-                type="email"
-                inputMode="email"
-                placeholder="you@example.com"
-                value={form.email}
-                onChange={(e) => onChange("email", e.target.value)}
-                className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </Field>
+            {errors.partySize && (
+              <p className="text-xs text-red-600">{errors.partySize}</p>
+            )}
+          </div>
 
-            <Field label="Name" error={errors.name}>
-              <input
-                placeholder="Your name"
-                value={form.name}
-                onChange={(e) => onChange("name", e.target.value)}
-                className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </Field>
+          {/* Mobile */}
+          <div>
+            <label className="text-sm font-medium">Mobile</label>
+            <input
+              value={form.mobile}
+              onChange={(e) => onChange("mobile", e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
+            />
+          </div>
 
-            <Field label="Notes (optional)">
-              <textarea
-                rows={3}
-                placeholder="High chair, pram, allergies..."
-                value={form.notes ?? ""}
-                onChange={(e) => onChange("notes", e.target.value)}
-                className="w-full resize-none rounded-xl border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-zinc-400"
-              />
-            </Field>
+          {/* Email */}
+          <div>
+            <label className="text-sm font-medium">Email</label>
+            <input
+              type="email"
+              value={form.email}
+              onChange={(e) => onChange("email", e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
+            />
+          </div>
 
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-zinc-900 px-4 py-3 text-sm font-medium text-white hover:bg-zinc-800"
-            >
-              Send booking request
-            </button>
+          {/* Name */}
+          <div>
+            <label className="text-sm font-medium">Name</label>
+            <input
+              value={form.name}
+              onChange={(e) => onChange("name", e.target.value)}
+              className="w-full border rounded-xl px-3 py-2"
+            />
+          </div>
 
-            <p className="text-xs text-zinc-500">
-              v0.2 • This is a request form. Confirmation comes next.
-            </p>
-          </form>
-        </section>
+          <button
+            type="submit"
+            className="w-full bg-black text-white rounded-xl py-3 mt-4"
+          >
+            Send booking request
+          </button>
+        </form>
       </div>
     </main>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  error,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  error?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-3">
-        <label className="text-sm font-medium text-zinc-900">{label}</label>
-        {hint ? <span className="text-xs text-zinc-500">{hint}</span> : null}
-      </div>
-      <div className="mt-1">{children}</div>
-      {error ? <p className="mt-1 text-xs text-red-600">{error}</p> : null}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <span className="text-zinc-500">{label}</span>
-      <span className="font-medium text-zinc-900">{value}</span>
-    </div>
   );
 }
