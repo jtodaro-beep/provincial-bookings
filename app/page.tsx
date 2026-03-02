@@ -37,12 +37,11 @@ function findSeating(guests: number): SeatingSuggestion | null {
     return { ...singleFits[0], reason: "Single table" };
   }
 
-  // 2) Try merge groups with caps
-  // We ONLY combine within the same merge group (no cross-group mega combos).
+  // 2) Try merge groups with caps (no cross-group mega combos)
   let best: SeatingSuggestion | null = null;
 
   for (const g of MERGE_GROUPS) {
-    // Respect maxGuests cap per group (your “max 6 in that zone” rule)
+    // Respect maxGuests cap per group (e.g. group4 max 6)
     if (g.maxGuests && guests > g.maxGuests) continue;
 
     const maxK = Math.min(g.maxTablesToCombine, g.tables.length);
@@ -74,20 +73,18 @@ function findSeating(guests: number): SeatingSuggestion | null {
   return best;
 }
 
-function parseDDMMYYYY(s: string): Date | null {
-  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (!m) return null;
-  const dd = Number(m[1]);
-  const mm = Number(m[2]);
-  const yyyy = Number(m[3]);
-  const d = new Date(yyyy, mm - 1, dd);
-  if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) return null;
-  return d;
+// IMPORTANT: parse YYYY-MM-DD safely (avoids timezone/UTC shifting)
+function parseISODateToLocal(dateStr: string): Date | null {
+  if (!dateStr) return null;
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length !== 3) return null;
+  const [y, m, d] = parts;
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d);
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
-// ✅ Key fix for the “012” issue:
-// Keep guests as a STRING while typing, not a number.
-// Convert to number only for validation / seating / submit.
+// Keep guests as TEXT while typing to avoid "012" issues.
 const BookingSchema = z.object({
   date: z.string().min(1, "Choose a date"),
   time: z.string().min(1, "Choose a time"),
@@ -123,14 +120,14 @@ export default function Home() {
   const [form, setForm] = useState({
     date: "",
     time: "",
-    guestsText: "", // ✅ string prevents "012"
+    guestsText: "",
     mobile: "",
     email: "",
     name: "",
     notes: "",
   });
 
-  const dateObj = useMemo(() => (form.date ? parseDDMMYYYY(form.date) : null), [form.date]);
+  const dateObj = useMemo(() => parseISODateToLocal(form.date), [form.date]);
   const closed = useMemo(() => (dateObj ? isClosedDay(dateObj) : false), [dateObj]);
 
   const guestsNumber = useMemo(() => {
@@ -151,6 +148,11 @@ export default function Home() {
       delete copy[key as string];
       return copy;
     });
+
+    // If date changes, clear time (prevents stale selections)
+    if (key === "date") {
+      setForm((f) => ({ ...f, time: "" }));
+    }
   }
 
   async function onSubmit(e: React.FormEvent) {
@@ -169,12 +171,12 @@ export default function Home() {
       return;
     }
 
-    const dateParsed = parseDDMMYYYY(form.date);
-    if (!dateParsed) {
-      setErrors((e) => ({ ...e, date: "Use dd/mm/yyyy" }));
+    const d = parseISODateToLocal(form.date);
+    if (!d) {
+      setErrors((e) => ({ ...e, date: "Choose a valid date" }));
       return;
     }
-    if (isClosedDay(dateParsed)) {
+    if (isClosedDay(d)) {
       setErrors((e) => ({ ...e, date: "Closed Sundays & Mondays" }));
       return;
     }
@@ -210,8 +212,8 @@ export default function Home() {
             <div>
               <label className="block text-sm font-medium">Date</label>
               <input
+                type="date"
                 className="mt-2 w-full rounded-xl border border-zinc-300 px-4 py-3 text-base outline-none focus:border-zinc-900"
-                placeholder="dd/mm/yyyy"
                 value={form.date}
                 onChange={(e) => update("date", e.target.value)}
               />
@@ -225,6 +227,7 @@ export default function Home() {
                 className="mt-2 w-full rounded-xl border border-zinc-300 px-4 py-3 text-base outline-none focus:border-zinc-900"
                 value={form.time}
                 onChange={(e) => update("time", e.target.value)}
+                disabled={!form.date || closed}
               >
                 <option value="">Choose a time</option>
                 {timeSlots.map((t) => (
@@ -296,7 +299,6 @@ export default function Home() {
               <label className="block text-sm font-medium">Notes (optional)</label>
               <textarea
                 className="mt-2 w-full rounded-xl border border-zinc-300 px-4 py-3 text-base outline-none focus:border-zinc-900"
-                placeholder="High chair, pram, allergies..."
                 rows={3}
                 value={form.notes}
                 onChange={(e) => update("notes", e.target.value)}
