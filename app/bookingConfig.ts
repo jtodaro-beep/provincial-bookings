@@ -1,98 +1,72 @@
-// app/bookingConfig.ts
-
 export const VENUE = {
   name: "THE PROVINCIAL",
-  closedDays: [0, 1] as const, // 0=Sunday, 1=Monday
-  openTime: "16:30",
-  lastBookingTime: "20:30",
-  slotMinutes: 30,
   maxGuests: 20,
+  startTime: "16:30",
+  endTime: "20:30",
+  intervalMinutes: 30,
+  closedWeekdays: [0, 1],
 };
 
-// Base tables
+export const ZONES = [
+  { id: "ENTRY", label: "Entry" },
+  { id: "BAR", label: "Bar" },
+  { id: "BOOTH", label: "The Booth" },
+  { id: "COURTYARD", label: "Courtyard" },
+];
+
 export const TABLES: Record<string, number> = {
   T1: 4,
   T2: 2,
   T3: 4,
   T4: 2,
   T5: 4,
-
   T10: 8,
   T11: 6,
   T12: 4,
   T13: 2,
   T14: 2,
   T15: 12,
-  T16: 2,
-  T17: 2,
   T18: 2,
   T19: 12,
-
   T30: 4,
   T31: 4,
-
   T34: 2,
   T35: 2,
   T36: 2,
   T37: 2,
 };
 
-// Merge rules
-// NOTE: group4 (T1..T5 zone) is capped to 6 guests total, even though seats add up.
-export type MergeGroup = {
-  id: string;
-  tables: string[];
-  maxTablesToCombine: number;
-  maxGuests?: number;
+export const TABLE_MIN_GUESTS: Record<string, number> = {
+  T10: 6,
+  T15: 8,
+  T19: 8,
 };
 
-export const MERGE_GROUPS: MergeGroup[] = [
-  {
-    id: "group1",
-    tables: ["T34", "T35", "T36", "T37"],
-    maxTablesToCombine: 2,
-    maxGuests: 4, // 2x2
-  },
-  {
-    id: "group2",
-    tables: ["T30", "T31"],
-    maxTablesToCombine: 2,
-    maxGuests: 8, // 4+4
-  },
-  {
-    id: "group3",
-    tables: ["T13", "T14", "T18"],
-    maxTablesToCombine: 3,
-    maxGuests: 6, // 2+2+2
-  },
-  {
-    id: "group4",
-    tables: ["T1", "T2", "T3", "T4", "T5"],
-    maxTablesToCombine: 2,
-    maxGuests: 6, // ✅ your rule
-  },
-];
+export const TABLE_ZONES: Record<string, string[]> = {
+  ENTRY: ["T30", "T31", "T34", "T35", "T36", "T37"],
+  BAR: ["T1", "T2", "T3", "T4", "T5"],
+  BOOTH: ["T10"],
+  COURTYARD: ["T11", "T12", "T13", "T14", "T15", "T18", "T19"],
+};
 
-// Helpers
-function toMinutes(hhmm: string) {
-  const [h, m] = hhmm.split(":").map(Number);
-  return h * 60 + m;
+export function buildTimeSlots() {
+  const [sh, sm] = VENUE.startTime.split(":").map(Number);
+  const [eh, em] = VENUE.endTime.split(":").map(Number);
+
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+
+  const slots: string[] = [];
+
+  for (let m = start; m <= end; m += VENUE.intervalMinutes) {
+    const hh = String(Math.floor(m / 60)).padStart(2, "0");
+    const mm = String(m % 60).padStart(2, "0");
+    slots.push(`${hh}:${mm}`);
+  }
+
+  return slots;
 }
 
-function toHHMM(mins: number) {
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-export function buildTimeSlots(): string[] {
-  const start = toMinutes(VENUE.openTime);
-  const end = toMinutes(VENUE.lastBookingTime);
-  const out: string[] = [];
-  for (let t = start; t <= end; t += VENUE.slotMinutes) out.push(toHHMM(t));
-  return out;
-}
-
-export function isClosedDay(date: Date) {
-  return (VENUE.closedDays as readonly number[]).includes(date.getDay());
+export function isClosedDay(d: Date) {
+  return VENUE.closedWeekdays.includes(d.getDay());
 }

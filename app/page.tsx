@@ -2,89 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { z } from "zod";
-import { MERGE_GROUPS, TABLES, VENUE, buildTimeSlots, isClosedDay } from "./bookingConfig";
+import { VENUE, ZONES, buildTimeSlots, isClosedDay } from "./bookingConfig";
 
-type SeatingSuggestion = { tables: string[]; seats: number; reason: string };
-
-function sumSeats(tables: string[]) {
-  return tables.reduce((acc, t) => acc + (TABLES[t] ?? 0), 0);
-}
-
-function combos<T>(arr: T[], k: number): T[][] {
-  const res: T[][] = [];
-  const walk = (start: number, path: T[]) => {
-    if (path.length === k) return void res.push(path.slice());
-    for (let i = start; i < arr.length; i++) {
-      path.push(arr[i]);
-      walk(i + 1, path);
-      path.pop();
-    }
-  };
-  walk(0, []);
-  return res;
-}
-
-function findSeating(guests: number): SeatingSuggestion | null {
-  if (!Number.isFinite(guests) || guests <= 0) return null;
-
-  // 1) Try single table first (best fit / least wasted seats)
-  const singleFits = Object.entries(TABLES)
-    .map(([t, seats]) => ({ tables: [t], seats }))
-    .filter((x) => x.seats >= guests)
-    .sort((a, b) => a.seats - b.seats);
-
-  if (singleFits.length) {
-    return { ...singleFits[0], reason: "Single table" };
-  }
-
-  // 2) Try merge groups with caps (no cross-group mega combos)
-  let best: SeatingSuggestion | null = null;
-
-  for (const g of MERGE_GROUPS) {
-    // Respect maxGuests cap per group (e.g. group4 max 6)
-    if (g.maxGuests && guests > g.maxGuests) continue;
-
-    const maxK = Math.min(g.maxTablesToCombine, g.tables.length);
-
-    for (let k = 2; k <= maxK; k++) {
-      const all = combos(g.tables, k)
-        .map((tables) => ({ tables, seats: sumSeats(tables) }))
-        .filter((x) => x.seats >= guests);
-
-      for (const c of all) {
-        const candidate: SeatingSuggestion = {
-          tables: c.tables,
-          seats: c.seats,
-          reason: `Merge (${g.id})`,
-        };
-
-        if (!best) best = candidate;
-        else {
-          // choose least wasted seats; tie-breaker: fewer tables
-          const wasteBest = best.seats - guests;
-          const wasteNew = candidate.seats - guests;
-          if (wasteNew < wasteBest) best = candidate;
-          else if (wasteNew === wasteBest && candidate.tables.length < best.tables.length) best = candidate;
-        }
-      }
-    }
-  }
-
-  return best;
-}
-
-// IMPORTANT: parse YYYY-MM-DD safely (avoids timezone/UTC shifting)
-function parseISODateToLocal(dateStr: string): Date | null {
-  if (!dateStr) return null;
-  const parts = dateStr.split("-").map(Number);
-  if (parts.length !== 3) return null;
-  const [y, m, d] = parts;
-  if (!y || !m || !d) return null;
-  const dt = new Date(y, m - 1, d);
-  return Number.isNaN(dt.getTime()) ? null : dt;
-}
-
-// Keep guests as TEXT while typing to avoid "012" issues.
 const BookingSchema = z.object({
   date: z.string().min(1, "Choose a date"),
   time: z.string().min(1, "Choose a time"),
@@ -94,6 +13,7 @@ const BookingSchema = z.object({
     .refine((v) => /^\d+$/.test(v), "Guests must be a number")
     .transform((v) => Number(v))
     .refine((n) => n >= 1 && n <= VENUE.maxGuests, `Guests must be 1–${VENUE.maxGuests}`),
+  zone: z.string().min(1, "Choose an area"),
   mobile: z.string().min(6, "Enter a mobile number"),
   email: z.string().email("Enter a valid email"),
   name: z.string().min(2, "Enter your name"),
@@ -104,23 +24,40 @@ type Submitted = {
   date: string;
   time: string;
   guests: number;
+  zone: string;
   mobile: string;
   email: string;
   name: string;
   notes?: string;
-  seating?: SeatingSuggestion | null;
+  assigned?: {
+    table: string;
+    seats: number;
+  };
 };
+
+function parseISODateToLocal(dateStr: string): Date | null {
+  if (!dateStr) return null;
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length !== 3) return null;
+  const [y, m, d] = parts;
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
 
 export default function Home() {
   const timeSlots = useMemo(() => buildTimeSlots(), []);
 
   const [submitted, setSubmitted] = useState<Submitted | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [serverError, setServerError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const [form, setForm] = useState({
     date: "",
     time: "",
     guestsText: "",
+    zone: "",
     mobile: "",
     email: "",
     name: "",
@@ -130,17 +67,6 @@ export default function Home() {
   const dateObj = useMemo(() => parseISODateToLocal(form.date), [form.date]);
   const closed = useMemo(() => (dateObj ? isClosedDay(dateObj) : false), [dateObj]);
 
-  const guestsNumber = useMemo(() => {
-    if (!form.guestsText) return null;
-    const n = Number(form.guestsText);
-    return Number.isFinite(n) ? n : null;
-  }, [form.guestsText]);
-
-  const seating = useMemo(() => {
-    if (!guestsNumber) return null;
-    return findSeating(guestsNumber);
-  }, [guestsNumber]);
-
   function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((f) => ({ ...f, [key]: value }));
     setErrors((e) => {
@@ -148,8 +74,8 @@ export default function Home() {
       delete copy[key as string];
       return copy;
     });
+    setServerError("");
 
-    // If date changes, clear time (prevents stale selections)
     if (key === "date") {
       setForm((f) => ({ ...f, time: "" }));
     }
@@ -158,9 +84,11 @@ export default function Home() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setErrors({});
+    setServerError("");
     setSubmitted(null);
 
     const parsed = BookingSchema.safeParse(form);
+
     if (!parsed.success) {
       const next: Record<string, string> = {};
       for (const issue of parsed.error.issues) {
@@ -171,28 +99,70 @@ export default function Home() {
       return;
     }
 
-    const d = parseISODateToLocal(form.date);
-    if (!d) {
+    if (!dateObj) {
       setErrors((e) => ({ ...e, date: "Choose a valid date" }));
       return;
     }
-    if (isClosedDay(d)) {
+
+    if (isClosedDay(dateObj)) {
       setErrors((e) => ({ ...e, date: "Closed Sundays & Mondays" }));
       return;
     }
 
-    const guests = parsed.data.guestsText;
+    try {
+      setSubmitting(true);
 
-    setSubmitted({
-      date: form.date,
-      time: form.time,
-      guests,
-      mobile: form.mobile,
-      email: form.email,
-      name: form.name,
-      notes: form.notes || undefined,
-      seating,
-    });
+      const res = await fetch("/api/book", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          date: form.date,
+          time: form.time,
+          guests: Number(form.guestsText),
+          zone: form.zone,
+          mobile: form.mobile,
+          email: form.email,
+          name: form.name,
+          notes: form.notes,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        setServerError(data.error || "Booking failed");
+        return;
+      }
+
+      setSubmitted({
+        date: form.date,
+        time: form.time,
+        guests: Number(form.guestsText),
+        zone: form.zone,
+        mobile: form.mobile,
+        email: form.email,
+        name: form.name,
+        notes: form.notes || undefined,
+        assigned: data.assigned,
+      });
+
+      setForm({
+        date: "",
+        time: "",
+        guestsText: "",
+        zone: "",
+        mobile: "",
+        email: "",
+        name: "",
+        notes: "",
+      });
+    } catch (err: any) {
+      setServerError(err?.message || "Something went wrong");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -217,7 +187,9 @@ export default function Home() {
                 value={form.date}
                 onChange={(e) => update("date", e.target.value)}
               />
-              {closed && form.date ? <p className="mt-2 text-sm text-red-600">Closed Sundays &amp; Mondays</p> : null}
+              {closed && form.date ? (
+                <p className="mt-2 text-sm text-red-600">Closed Sundays &amp; Mondays</p>
+              ) : null}
               {errors.date ? <p className="mt-2 text-sm text-red-600">{errors.date}</p> : null}
             </div>
 
@@ -242,24 +214,30 @@ export default function Home() {
             <div>
               <label className="block text-sm font-medium">Number of guests</label>
               <input
-                type="number"
                 inputMode="numeric"
-                min={1}
-                max={VENUE.maxGuests}
                 className="mt-2 w-full rounded-xl border border-zinc-300 px-4 py-3 text-base outline-none focus:border-zinc-900"
                 value={form.guestsText}
-                onChange={(e) => update("guestsText", e.target.value)}
+                onChange={(e) => update("guestsText", e.target.value.replace(/[^\d]/g, ""))}
                 placeholder="2"
               />
               {errors.guestsText ? <p className="mt-2 text-sm text-red-600">{errors.guestsText}</p> : null}
+            </div>
 
-              {form.guestsText && guestsNumber && (
-                <p className="mt-2 text-sm text-zinc-600">
-                  {seating
-                    ? `Seating suggestion: ${seating.tables.join(" + ")} (${seating.seats} seats)`
-                    : "No available table merge for this number of guests"}
-                </p>
-              )}
+            <div>
+              <label className="block text-sm font-medium">Preferred area</label>
+              <select
+                className="mt-2 w-full rounded-xl border border-zinc-300 px-4 py-3 text-base outline-none focus:border-zinc-900"
+                value={form.zone}
+                onChange={(e) => update("zone", e.target.value)}
+              >
+                <option value="">Choose an area</option>
+                {ZONES.map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.label}
+                  </option>
+                ))}
+              </select>
+              {errors.zone ? <p className="mt-2 text-sm text-red-600">{errors.zone}</p> : null}
             </div>
 
             <div>
@@ -305,30 +283,35 @@ export default function Home() {
               />
             </div>
 
+            {serverError ? <p className="text-sm text-red-600">{serverError}</p> : null}
+
             <button
               type="submit"
-              className="w-full rounded-2xl bg-zinc-900 px-5 py-4 text-base font-medium text-white shadow-sm"
-              disabled={closed}
+              className="w-full rounded-2xl bg-zinc-900 px-5 py-4 text-base font-medium text-white shadow-sm disabled:opacity-60"
+              disabled={closed || submitting}
             >
-              Send booking request
+              {submitting ? "Booking..." : "Confirm booking"}
             </button>
 
             {submitted && (
               <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-800">
-                <p className="font-medium">Request captured</p>
+                <p className="font-medium">Booking confirmed</p>
                 <p className="mt-1">
-                  {submitted.date} at {submitted.time} — {submitted.guests} guests
+                  {submitted.date} at {submitted.time} — {submitted.guests} guests ({submitted.zone})
                 </p>
-                {submitted.seating ? (
+                {submitted.assigned ? (
                   <p className="mt-1 text-zinc-600">
-                    Seating: {submitted.seating.tables.join(" + ")} ({submitted.seating.seats} seats)
+                    Table: {submitted.assigned.table} ({submitted.assigned.seats} seats)
                   </p>
                 ) : null}
-                <p className="mt-2 text-zinc-600">Next step: admin confirmation + availability check.</p>
               </div>
             )}
           </form>
         </section>
+
+        <p className="mt-4 text-xs text-zinc-500">
+          v0.4 • Automatic table allocation using Google Sheets.
+        </p>
       </div>
     </main>
   );
